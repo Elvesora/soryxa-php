@@ -1,6 +1,5 @@
 {
     "name": "elvesora/soryxa-php",
-    "version": "1.0.0",
     "description": "Pure PHP SDK for the Soryxa email validation API",
     "keywords": ["soryxa", "email", "validation", "php"],
     "license": "MIT",
@@ -25,6 +24,9 @@
         "psr-4": {
             "Elvesora\\SoryxaPHP\\Tests\\": "tests/"
         }
+    },
+    "scripts": {
+        "test": "@php tests/run.php"
     },
     "minimum-stability": "stable",
     "prefer-stable": true

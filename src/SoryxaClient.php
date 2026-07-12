@@ -40,13 +40,20 @@ class SoryxaClient {
      *
      * @throws SoryxaException
      */
-    public function validate(string $email): ValidationResult {
+    public function validate(
+        string $email,
+        ?string $policyKey = null,
+        array $headers = [],
+    ): ValidationResult {
         try {
-            $body = $this->post('/api/v1/validate', [
-                'email' => $email,
-            ]);
+            $response = $this->send(
+                'POST',
+                $this->url('/api/v1/validate'),
+                $this->validationPayload($email, $policyKey),
+                $headers,
+            );
 
-            return ValidationResult::fromResponse($body);
+            return ValidationResult::fromResponse($response['body'], $response['headers']);
         } catch (UsageLimitException $e) {
             if ($this->silentOnLimit) {
                 return ValidationResult::limitExceeded($email);
@@ -56,28 +63,38 @@ class SoryxaClient {
         }
     }
 
+    protected function validationPayload(string $email, ?string $policyKey = null): array {
+        $payload = ['email' => $email];
+
+        if ($policyKey !== null) {
+            $payload['policy_key'] = $policyKey;
+        }
+
+        return $payload;
+    }
+
     // -------------------------------------------------------------------------
     //  HTTP Transport
     // -------------------------------------------------------------------------
 
-    protected function get(string $path, array $query = []): array {
+    protected function get(string $path, array $query = [], array $headers = []): array {
         $url = $this->url($path);
 
         if ($query) {
             $url .= '?' . http_build_query($query);
         }
 
-        return $this->send('GET', $url);
+        return $this->send('GET', $url, null, $headers)['body'];
     }
 
-    protected function post(string $path, array $data = []): array {
-        return $this->send('POST', $this->url($path), $data);
+    protected function post(string $path, array $data = [], array $headers = []): array {
+        return $this->send('POST', $this->url($path), $data, $headers)['body'];
     }
 
     /**
      * @throws SoryxaException
      */
-    protected function send(string $method, string $url, ?array $data = null): array {
+    protected function send(string $method, string $url, ?array $data = null, array $headers = []): array {
         $attempt = 0;
         $maxAttempts = 1 + $this->retries;
 
@@ -89,13 +106,10 @@ class SoryxaClient {
             curl_setopt_array($ch, [
                 CURLOPT_URL => $url,
                 CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => true,
                 CURLOPT_TIMEOUT => $this->timeout,
                 CURLOPT_CONNECTTIMEOUT => $this->timeout,
-                CURLOPT_HTTPHEADER => [
-                    'Authorization: Bearer ' . $this->token,
-                    'Accept: application/json',
-                    'Content-Type: application/json',
-                ],
+                CURLOPT_HTTPHEADER => $this->buildHeaders($headers),
             ]);
 
             if ($method === 'POST') {
@@ -103,16 +117,22 @@ class SoryxaClient {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data ?? []));
             }
 
-            $responseBody = curl_exec($ch);
+            $rawResponse = curl_exec($ch);
             $errno = curl_errno($ch);
             $error = curl_error($ch);
             $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
 
             curl_close($ch);
 
             if ($errno) {
                 throw ConnectionException::fromCurlError($errno, $error);
             }
+
+            $rawResponse = is_string($rawResponse) ? $rawResponse : '';
+            $rawHeaders = substr($rawResponse, 0, $headerSize) ?: '';
+            $responseBody = substr($rawResponse, $headerSize) ?: '';
+            $responseHeaders = $this->parseHeaders($rawHeaders);
 
             // Retry on 5xx if attempts remain
             if ($statusCode >= 500 && $attempt < $maxAttempts) {
@@ -134,8 +154,46 @@ class SoryxaClient {
                 throw SoryxaException::fromResponse($statusCode, $body);
             }
 
-            return $body;
+            return [
+                'body' => $body,
+                'headers' => $responseHeaders,
+            ];
         }
+    }
+
+    protected function buildHeaders(array $headers = []): array {
+        $headerLines = [
+            'Authorization: Bearer ' . $this->token,
+            'Accept: application/json',
+            'Content-Type: application/json',
+        ];
+
+        foreach ($headers as $name => $value) {
+            if ($value === null) {
+                continue;
+            }
+
+            $headerLines[] = $name . ': ' . $value;
+        }
+
+        return $headerLines;
+    }
+
+    protected function parseHeaders(string $rawHeaders): array {
+        $headers = [];
+        $blocks = preg_split("/\r\n\r\n/", trim($rawHeaders));
+        $lastBlock = $blocks ? (string) end($blocks) : '';
+
+        foreach (preg_split("/\r\n/", $lastBlock) ?: [] as $line) {
+            if (!str_contains($line, ':')) {
+                continue;
+            }
+
+            [$name, $value] = explode(':', $line, 2);
+            $headers[trim($name)] = trim($value);
+        }
+
+        return $headers;
     }
 
     protected function url(string $path): string {
